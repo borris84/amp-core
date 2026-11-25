@@ -162,7 +162,30 @@ char codecMaskToLetter(uint32_t mask);
  * @param codecsCapacity The space available in codecs.
  * @returns The number of CODECs in the resulting list.
  */
-unsigned parseCodecPref(const char* prefList, uint32_t* codecs, unsigned codecsCapacity);
+unsigned parseCodecPref(const char* prefList, uint32_t* codecs, unsigned codecsCapacity,
+    bool legacyAmpersand = false);
+
+/**
+ * Builds a CODEC_PREFS string (Asterisk letters) for our preference order.
+ */
+unsigned makeCodecPrefString(char* buf, unsigned bufCapacity);
+
+/**
+ * Converts a CODEC to the one-byte subclass of a full VOICE frame. Values
+ * >= 0x80 are sent as 0x80 | log2(codec) (ex: SLIN16 = 0x8f).
+ */
+uint8_t compressCodecSubclass(uint32_t codec);
+
+/**
+ * Pre-2026-11 Ampersand nodes sent a bad 64-bit CAPABILITY2. Asterisk always
+ * sends a 64-bit value whose lower 32 bits match the 32-bit IE.
+ */
+bool isLegacyAmpersandWideCodec(uint32_t narrow, uint32_t wideLow32);
+
+/**
+ * Parses the 64-bit CAPABILITY2/FORMAT2 representation (lower 32 bits).
+ */
+bool parseCodecWide(const uint8_t* buf, unsigned len, uint32_t* codecs);
 
 /**
  * Makes a decision about the CODEC that should be used for the call based 
