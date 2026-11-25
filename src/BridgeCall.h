@@ -136,6 +136,13 @@ public:
     std::string getRemoteNodeNumber() const { return _remoteNodeNumber; }
 
     /**
+     * Marks the call as coming from an app (ASL App Authentication) rather 
+     * than a node. In this case the "node number" is a callsign.
+     */
+    void setAppClient(bool a) { _appClient = a; }
+    bool isAppClient() const { return _appClient; }
+
+    /**
      * @returns true if this call was recently the source of commands
      * such as DTMF, remote signaling, etc. This is often used to 
      * determine whether state change announcement should be directed
@@ -255,6 +262,7 @@ private:
     // Default to 1 in q11 format
     int16_t _echoScale = 2048;
     bool _sourceAddrValidated = false;
+    bool _appClient = false;
     Mode _mode = Mode::NORMAL;
     bool _permanent = false;
     uint64_t _callStartMs = 0;

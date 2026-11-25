@@ -34,3 +34,6 @@
 [submodule "base64.c"]
 	path = base64.c
 	url = https://github.com/joedf/base64.c.git
+[submodule "libg722"]
+	path = libg722
+	url = https://github.com/sippy/libg722.git

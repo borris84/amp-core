@@ -32,6 +32,7 @@
 #include "Transcoder_SLIN_16K.h"
 #include "Transcoder_SLIN_48K.h"
 #include "Transcoder_G726.h"
+#include "Transcoder_G722.h"
 #include "KerchunkFilter.h"
 
 namespace kc1fsz {
@@ -87,6 +88,7 @@ public:
         _transcoder0c.reset(); 
         _transcoder0d.reset(); 
         _transcoder0e.reset(); 
+        _transcoder0f.reset(); 
         _transcoder1.reset(); 
         _resampler.reset(); 
         _kerchunkFilter.reset();
@@ -178,6 +180,7 @@ private:
     Transcoder_SLIN_16K _transcoder0c;
     Transcoder_SLIN_48K _transcoder0d;
     Transcoder_G726 _transcoder0e;
+    Transcoder_G722 _transcoder0f;
 
     // This is used to satisfy interpolation requests from
     // the Jitter Buffer.

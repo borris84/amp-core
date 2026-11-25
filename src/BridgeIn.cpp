@@ -171,11 +171,14 @@ void BridgeIn::_handleJitBufOut(const Message& frame) {
                 _plc.badFrame(pcm2 + BLOCK_SIZE_8K / 2, BLOCK_SIZE_8K / 2);
             }
         }
-        else if (_codecType == CODECType::IAX2_CODEC_SLIN_16K) {
+        else if (_codecType == CODECType::IAX2_CODEC_SLIN_16K ||
+                 _codecType == CODECType::IAX2_CODEC_G722) {
             if (frame.getType() == Message::Type::AUDIO) {
                 int16_t pcm1[BLOCK_SIZE_16K];
+                Transcoder* tc = (_codecType == CODECType::IAX2_CODEC_G722) ? 
+                    (Transcoder*)&_transcoder0f : (Transcoder*)&_transcoder0c;
                 // Transcode
-                _transcoder0c.decode(frame.body(), frame.size(), 
+                tc->decode(frame.body(), frame.size(), 
                     pcm1, codecBlockSize(_codecType));            
                 // Pass audio through the PLC mechanism
                 // PLC operates on 10ms blocks so there are two calls

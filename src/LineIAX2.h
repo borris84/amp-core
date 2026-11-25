@@ -81,6 +81,46 @@ public:
 };
 
 /**
+ * Used to validate AllStarLink "App Authentication" (ASL002) tokens. An app
+ * (ex: RepeaterPhone, DVSwitch Mobile) obtains a one-time token from the ASL 
+ * API and passes "TOKEN/CALLSIGN" in the CALLING_NAME IE. The node asks the 
+ * ASL API whether the token is valid for that callsign.
+ *
+ * Implementations MUST NOT block. LineIAX2 polls getResult() from its event
+ * loop.
+ *
+ * See: https://github.com/AllStarLink/Standards/blob/main/ASL002-App_Authentication.md
+ */
+class AppAuthValidator {
+public:
+
+    enum class Status { PENDING, VALID, INVALID };
+
+    virtual ~AppAuthValidator() = default;
+
+    /**
+     * Starts an asynchronous validation.
+     * @param callsign May be empty (legacy WebTransceiver token).
+     * @returns false if the request could not be started.
+     */
+    virtual bool requestValidation(unsigned requestId, const char* token, 
+        const char* callsign) = 0;
+
+    /**
+     * @param validatedCallsign Filled in with the callsign returned by the
+     *   ASL API on success.
+     * @returns PENDING until the validation is complete. Once VALID/INVALID
+     *   has been returned the request is forgotten.
+     */
+    virtual Status getResult(unsigned requestId, fixedstring& validatedCallsign) = 0;
+
+    /**
+     * Indicates that we are no longer interested in the result.
+     */
+    virtual void cancel(unsigned requestId) = 0;
+};
+
+/**
  * An implementation of the Line interface that communicates with
  * IAX2 stations via UDP. 
  */
@@ -164,6 +204,21 @@ public:
      * required.
      */
     void setAuthenticationChecked(bool ac) { _authenticationChecked = ac; }
+
+    /**
+     * Enables AllStarLink "App Authentication" (ASL002) for inbound calls. 
+     * Calls that arrive with the IAX USERNAME "allstar-public" are challenged 
+     * with MD5 using the well-known secret "allstar" (same as the ASL3 
+     * [allstar-public] iax.conf stanza) and then the TOKEN/CALLSIGN in the 
+     * CALLING_NAME is checked with the validator. As in the ASL3 dialplan,
+     * the CALLING_NUMBER carries the node number being connected to.
+     *
+     * If the app authentication fails the call is rejected when 
+     * authentication is required. Otherwise the call proceeds unvalidated.
+     *
+     * @param v The validator, or null to disable app authentication.
+     */
+    void setAppAuthValidator(AppAuthValidator* v) { _appAuthValidator = v; }
 
     /**
      * Opens the network connection for in/out traffic for this line.
@@ -282,6 +337,12 @@ public:
             STATE_AUTH_WAIT_0d,
             // Sent out the AUTHREQ challenge and waiting for the response
             STATE_AUTHREP_WAIT_1,
+            // (CALLED) App caller passed MD5, need to start the token validation
+            STATE_APPAUTH_REQUESTED,
+            // (CALLED) Waiting for the app token validation result
+            STATE_APPAUTH_WAIT,
+            // (CALLED) App token validation failed or timed out
+            STATE_APPAUTH_FAILED,
             // All validations complete, clear to send accept
             STATE_CALLER_VALIDATED,
             // (CALLER) Have received the ACCEPT, waiting for the ANSWER
@@ -349,6 +410,12 @@ public:
 
         int authMethod = 0;
         fixedstring authChallenge;
+        // App Authentication (ASL002). These are plain arrays since the 
+        // token (64 hex characters) doesn't fit in a fixedstring.
+        bool appClient = false;
+        char appAuthToken[65] = { 0 };
+        char appAuthCallsign[65] = { 0 };
+        unsigned appAuthRequestId = 0;
 
         uint32_t lastFrameRxMs = 0;
         
@@ -449,6 +516,9 @@ private:
     LocalRegistry* _locReg = 0;
     // Used to authenticate incoming calls to private nodes
     LocalAuthenticator* _locAuth = 0;
+    // Used to validate ASL App Authentication tokens (optional)
+    AppAuthValidator* _appAuthValidator = 0;
+    unsigned _appAuthRequestIdCounter = 1;
     // The line that all messages are directed to
     const unsigned _destLineId;
     const fixedstring _publicUser;
@@ -534,6 +604,25 @@ private:
 
     void _sendACK(uint32_t timeStamp, Call& call); 
     void _sendREJECT(uint16_t destCall, const sockaddr& peerAddr, const char* cause);
+
+    /**
+     * Sends a REJECT inside of an existing call and starts the termination.
+     */
+    void _rejectCall(Call& call, const char* cause);
+
+    /**
+     * Sends an MD5 AUTHREQ challenge to the caller and waits for the AUTHREP.
+     * call.password must already contain the shared secret.
+     */
+    void _sendMD5AuthReq(Call& call);
+
+    /**
+     * Reads a CODEC IE, preferring the 64-bit Asterisk version (which is 
+     * what Asterisk itself does) and falling back to the 32-bit version.
+     * @returns true if either was found
+     */
+    static bool _getCodecIE(const IAX2FrameFull& frame, uint8_t wideId, 
+        uint8_t narrowId, uint32_t* codecs);
 
     /**
      * Sends a TEXT !!DISCONNECT!! to the peer. If nothing happens after a few seconds

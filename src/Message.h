@@ -213,6 +213,9 @@ struct PayloadCallStart {
     bool originated = false;
     bool sourceAddrValidated = false;
     bool permanent = false;
+    // The caller is an app (ASL App Authentication) rather than a node. 
+    // In this case remoteNumber is the callsign.
+    bool appClient = false;
 };
 
 struct PayloadCallEnd {

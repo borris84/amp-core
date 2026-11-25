@@ -74,6 +74,11 @@ static const uint32_t FAST_PING_INTERVAL_MS = 2 * 1000;
 // How long we will wait around before cleaning up a terminated call. 
 // This window is used to allow time to re-transmit and unacknowledged messages.
 static const uint32_t TERMINATION_TIMEOUT_MS = 5 * 1000;
+// How long we wait for the ASL API to validate an app token
+static const uint32_t APPAUTH_TIMEOUT_MS = 6 * 1000;
+// The IAX user and MD5 secret used by apps (ASL3 [allstar-public] in iax.conf)
+static const char* APPAUTH_USER = "allstar-public";
+static const char* APPAUTH_SECRET = "allstar";
 // How long we wait for a callee to respond to our NEW
 #define CALL_INITIATION_TIMEOUS_MS (2000)
 // How long we wait for a DNS response
@@ -744,10 +749,18 @@ void LineIAX2::_processFullFrame(const uint8_t* potentiallyDangerousBuf,
             // At this point a NEW has been received that has passed the CALLTOKEN
             // stage. Proceed with the next level of authentication.
 
+            // Look for App Authentication (ASL002) callers. These follow the 
+            // ASL3 [allstar-public] dialplan convention: the CALLING_NUMBER is 
+            // the local node being connected to and the CALLING_NAME is 
+            // TOKEN/CALLSIGN.
+            char temp[33];
+            const bool isAppCall = _appAuthValidator != 0 &&
+                frame.getIE_str(IEType::IAX2_IE_USERNAME, temp, sizeof(temp)) &&
+                strcmp(temp, APPAUTH_USER) == 0;
+
             // IMPORTANT: The target number comes in with a leading "3"
             // which is removed here.
             fixedstring targetNumber;
-            char temp[33];
             bool found = frame.getIE_str(1, temp, 33);
             // NOTE: It's not completely clear, but it 
             // appears that some stations send the number
@@ -760,16 +773,9 @@ void LineIAX2::_processFullFrame(const uint8_t* potentiallyDangerousBuf,
                 targetNumber = temp + 1;
             } else if (found) {
                 targetNumber = temp;
-            } else {
+            } else if (!isAppCall) {
                 _log.error("No target number provided");
                 _sendREJECT(destCallId, peerAddr, "Called number missing");
-                return;
-            }
-
-            if (_destAuthorizer &&
-                !_destAuthorizer->isAuthorized(targetNumber.c_str())) {
-                _log.error("Wrong number");
-                _sendREJECT(destCallId, peerAddr, "Wrong number");
                 return;
             }
 
@@ -782,7 +788,21 @@ void LineIAX2::_processFullFrame(const uint8_t* potentiallyDangerousBuf,
                 return;
             }
 
-            if (_sourceAuthorizer &&
+            // For apps the node being connected to is in the calling number
+            // (NODENUM=${CALLERID(num)} in the ASL3 dialplan).
+            if (isAppCall)
+                targetNumber = callingNumber;
+
+            if (_destAuthorizer &&
+                !_destAuthorizer->isAuthorized(targetNumber.c_str())) {
+                _log.error("Wrong number");
+                _sendREJECT(destCallId, peerAddr, "Wrong number");
+                return;
+            }
+
+            // NOTE: The source check doesn't apply to apps since they don't
+            // have a node number.
+            if (!isAppCall && _sourceAuthorizer &&
                 !_sourceAuthorizer->isAuthorized(callingNumber.c_str())) {
                 _log.info("Call from %s rejected", callingNumber.c_str());
                 _sendREJECT(destCallId, peerAddr, "UNKNOWN");
@@ -801,12 +821,29 @@ void LineIAX2::_processFullFrame(const uint8_t* potentiallyDangerousBuf,
             // This is optional, should contain the user's callsign for lookup
             // in public databases.
             fixedstring callingName;
-            if (frame.getIE_str(IEType::IAX2_IE_CALLING_NAME, temp, sizeof(temp)))
+            // App Authentication: TOKEN/CALLSIGN (or a legacy 12-character 
+            // WebTransceiver token with no callsign)
+            char appAuthToken[65] = { 0 };
+            char appAuthCallsign[65] = { 0 };
+            if (isAppCall) {
+                char nameTemp[160];
+                if (!frame.getIE_str(IEType::IAX2_IE_CALLING_NAME, nameTemp, sizeof(nameTemp)) ||
+                    !parseAppAuthCallingName(nameTemp, appAuthToken, sizeof(appAuthToken),
+                        appAuthCallsign, sizeof(appAuthCallsign))) {
+                    _log.info("App call has missing/invalid token");
+                    _sendREJECT(destCallId, peerAddr, "Authentication failed");
+                    return;
+                }
+                _log.info("App call to %s from %s", targetNumber.c_str(), 
+                    appAuthCallsign[0] ? appAuthCallsign : "(legacy client)");
+            }
+            else if (frame.getIE_str(IEType::IAX2_IE_CALLING_NAME, temp, sizeof(temp)))
                 callingName = temp;
 
             // What CODECs are supported by the caller?
             uint32_t capableCodecs = 0;
-            if (!frame.getIE_uint32(IEType::IAX2_IE_CAPABILITY, &capableCodecs)) {
+            if (!_getCodecIE(frame, IEType::IAX2_IE_CAPABILITY_WIDE, 
+                    IEType::IAX2_IE_CAPABILITY, &capableCodecs)) {
                 _log.error("No CODEC capability provided");
                 _sendREJECT(destCallId, peerAddr, "CODEC capability missing");
                 return;
@@ -831,15 +868,18 @@ void LineIAX2::_processFullFrame(const uint8_t* potentiallyDangerousBuf,
             // has been selected for the call.  Its data is represented in a 4-octet
             // bitmask according to Section 8.7.  
             uint32_t desiredCodec = 0;
-            frame.getIE_uint32(IEType::IAX2_IE_FORMAT, &desiredCodec);
+            _getCodecIE(frame, IEType::IAX2_IE_FORMAT_WIDE, 
+                IEType::IAX2_IE_FORMAT, &desiredCodec);
 
             // Get the caller's CODEC preferences (optional). This is represented a 
             // string which gets converted to a list of masks.
-            char codecPrefs[8] = { 0 };
-            frame.getIE_str(IEType::IAX2_IE_CODEC_PREFS, codecPrefs, 8);
+            // NOTE: Asterisk can send up to 32 preferences, and the IE 
+            // read fails entirely if the buffer is too small.
+            char codecPrefs[65] = { 0 };
+            frame.getIE_str(IEType::IAX2_IE_CODEC_PREFS, codecPrefs, sizeof(codecPrefs));
             //_log.info("Caller CODEC preferences [%s]", codecPrefs);
 
-            const unsigned preferredCodecsCapacity = 8;
+            const unsigned preferredCodecsCapacity = 64;
             uint32_t preferredCodecs[preferredCodecsCapacity];
             const unsigned preferredCodecCount = parseCodecPref(codecPrefs, 
                 preferredCodecs, preferredCodecsCapacity);
@@ -915,6 +955,14 @@ void LineIAX2::_processFullFrame(const uint8_t* potentiallyDangerousBuf,
             call.remoteNumber = callingNumber;
             call.callUser = callingUser;
             call.callingName = callingName;
+            if (isAppCall) {
+                call.appClient = true;
+                // The app doesn't have a node number. Until it is validated 
+                // we don't know who this is.
+                call.remoteNumber = "app";
+                strcpyLimited(call.appAuthToken, appAuthToken, sizeof(call.appAuthToken));
+                strcpyLimited(call.appAuthCallsign, appAuthCallsign, sizeof(call.appAuthCallsign));
+            }
             // Move the entire address in for use when sending out messages
             memcpy(&call.peerAddr, &peerAddr, getIPAddrSize(peerAddr));
             // Schedule the ping out
@@ -936,7 +984,14 @@ void LineIAX2::_processFullFrame(const uint8_t* potentiallyDangerousBuf,
             //   b. If the user has requested private authentication (ie USERNAME!=radio)
             //      then we perform a local authentication.
 
-            if (!_authenticationRequired && !_authenticationChecked) {
+            if (call.appClient) {
+                // Apps always go through the ASL002 flow (the same as an ASL3
+                // node). The first step is MD5 with the well-known secret.
+                _log.info("Using app authentication");
+                call.password = APPAUTH_SECRET;
+                _sendMD5AuthReq(call);
+            }
+            else if (!_authenticationRequired && !_authenticationChecked) {
                 _log.info("No authentication");
                 call.setState(Call::State::STATE_CALLER_VALIDATED);
             }
@@ -957,37 +1012,22 @@ void LineIAX2::_processFullFrame(const uint8_t* potentiallyDangerousBuf,
 
                     _log.info("Using private authentication for user %s", callingUser.c_str());
 
-                    // MD5 method
-                    call.authMethod = 0x02;
-                    // Make a challenge nonce that uses some things that are unique to the call
-                    char challenge[32];
-                    snprintf(challenge, sizeof(challenge), "%u%u", call.localCallId, call.localStartMs);
-                    call.authChallenge = challenge;
                     // Authenticator is the shared secret in this case
                     call.password = _locAuth->getSecret(targetNumber.c_str(),
                         callingUser.c_str());
                     if (!call.password.empty()) {
-                        IAX2FrameFull authreqFrame;
-                        authreqFrame.setHeader(call.localCallId, call.remoteCallId, 
-                            call.dispenseElapsedMs(_clock), 
-                            call.outSeqNo, call.expectedInSeqNo, 
-                            FrameType::IAX2_TYPE_IAX, IAXSubclass::IAX2_SUBCLASS_IAX_AUTHREQ);
-                        authreqFrame.addIE_uint16(IEType::IAX2_IE_AUTHMETHODS, call.authMethod);
-                        authreqFrame.addIE_str(IEType::IAX2_IE_CHALLENGE, call.authChallenge);
-
-                        _sendFrameToPeer(authreqFrame, call);
-
-                        call.setState(Call::State::STATE_AUTHREP_WAIT_1, CALL_INITIATION_TIMEOUS_MS,
-                            Call::State::STATE_TERMINATED);
-                        call.active = true;
+                        _sendMD5AuthReq(call);
                     }
                     else {
                         _log.info("Node/user %s/%s not found", 
                             targetNumber.c_str(), callingUser.c_str());
+                        _sendREJECT(destCallId, peerAddr, "Authentication failed");
                     }
                 }
                 // No authentication possible
                 else {
+                    _log.info("No authentication method for user %s", callingUser.c_str());
+                    _sendREJECT(destCallId, peerAddr, "Authentication failed");
                 }
             }
         }
@@ -1254,17 +1294,26 @@ void LineIAX2::_processFullFrame(const uint8_t* potentiallyDangerousBuf,
 
                     if (strcmp(sigHex, tokenHashedText) == 0) {
                         _log.info("Call %u good signature", destCallId);
-                        untrustedCall.setState(Call::State::STATE_CALLER_VALIDATED);
-                        untrustedCall.isRegistered = true;
+                        if (untrustedCall.appClient) {
+                            // The MD5 secret is public, the token is what matters
+                            untrustedCall.setState(Call::State::STATE_APPAUTH_REQUESTED);
+                        } else {
+                            untrustedCall.setState(Call::State::STATE_CALLER_VALIDATED);
+                            untrustedCall.isRegistered = true;
+                        }
                     }
                     else {
                         if (_authenticationRequired) {
                             _log.info("Call %u authentication failed", destCallId);
+                            if (untrustedCall.appClient)
+                                _rejectCall(untrustedCall, "Authentication failed");
                             return;
                         }
                         else {
                             _log.info("Call %u bad signature, not required", destCallId);                   
-                            untrustedCall.setState(Call::State::STATE_CALLER_VALIDATED);
+                            untrustedCall.setState(untrustedCall.appClient ?
+                                Call::State::STATE_APPAUTH_REQUESTED :
+                                Call::State::STATE_CALLER_VALIDATED);
                         }
                     }
                 }
@@ -1569,7 +1618,8 @@ void LineIAX2::_processFullFrameInCall(const IAX2FrameFull& frame, Call& call,
 
         // Pull out the CODEC assignment
         uint32_t codec;
-        if (!frame.getIE_uint32(IEType::IAX2_IE_FORMAT, &codec)) {
+        if (!_getCodecIE(frame, IEType::IAX2_IE_FORMAT_WIDE, 
+                IEType::IAX2_IE_FORMAT, &codec)) {
             _log.error("Unable to get assigned CODEC");
             _hangupCall(call);
             return;
@@ -1744,8 +1794,9 @@ void LineIAX2::_processFullFrameInCall(const IAX2FrameFull& frame, Call& call,
             // #### TODO: NEED TO GET THE RIGHT TIMESTAMP!
             // #### TODO: NEED TO GET THE RIGHT TIMESTAMP!
             // #### TODO: NEED TO GET THE RIGHT TIMESTAMP!
+            // The audio starts after the 12-byte full frame header
             MessageWrapper voiceMsg(Message::Type::AUDIO, call.codec,
-                vfs, frame.buf(), frame.getTimeStamp(), rxStampMs);
+                vfs, frame.buf() + 12, frame.getTimeStamp(), rxStampMs);
             voiceMsg.setSource(_busId, call.localCallId);
             voiceMsg.setDest(_destLineId, Message::UNKNOWN_CALL_ID);
             _bus.consume(voiceMsg);
@@ -2330,9 +2381,12 @@ void LineIAX2::_progressCaller(Call& call) {
         // be the first IE; the order of other IEs is unspecified. 
         frame.addIE_uint16(IEType::IAX2_IE_VERSION, 0x0002);
         frame.addIE_str(1, call.remoteNumber);
-        // CODECs are mapped to letters staring with "B". D means ulaw.
-        // This code means SLIN16, ULAW, G726_AAL2, SLIN8
-        frame.addIE_str(IEType::IAX2_IE_CODEC_PREFS, "QDFH", 3);
+        // CODECs are mapped to letters using Asterisk's codec preference 
+        // table (see codecLetterToMask()). Ex: "POHDN" means SLIN16, G722, 
+        // SLIN8, ULAW, G726_AAL2.
+        char codecPrefs[16];
+        makeCodecPrefString(codecPrefs, sizeof(codecPrefs));
+        frame.addIE_str(IEType::IAX2_IE_CODEC_PREFS, codecPrefs, strlen(codecPrefs));
         frame.addIE_str(IEType::IAX2_IE_CALLING_NUMBER, call.localNumber);
         // Not sure what these are for?
         frame.addIE_uint8(38, 0x00);
@@ -2352,13 +2406,13 @@ void LineIAX2::_progressCaller(Call& call) {
         frame.addIE_uint32(IEType::IAX2_IE_FORMAT, call.desiredCodec);
         char desiredCodecWide[9];
         fillCodecWide(call.desiredCodec, desiredCodecWide);
-        frame.addIE_str(0x38, desiredCodecWide, 9);        
+        frame.addIE_str(IEType::IAX2_IE_FORMAT_WIDE, desiredCodecWide, 9);        
 
         // CODEC capabilities
         frame.addIE_uint32(IEType::IAX2_IE_CAPABILITY, getSupportedCodecs());
         char capabilityCodecWide[9];
         fillCodecWide(getSupportedCodecs(), capabilityCodecWide);
-        frame.addIE_str(0x37, capabilityCodecWide, 9);
+        frame.addIE_str(IEType::IAX2_IE_CAPABILITY_WIDE, capabilityCodecWide, 9);
 
         // CPE ADSI - "Analog display services interface (ADSI)"
         // TODO: WHAT IS THIS FOR?
@@ -2443,6 +2497,49 @@ void LineIAX2::_progressCallee(Call& call) {
             }
         } 
     }
+    else if (call.state == Call::State::STATE_APPAUTH_REQUESTED) {
+        call.appAuthRequestId = _appAuthRequestIdCounter++;
+        if (_appAuthValidator && _appAuthValidator->requestValidation(call.appAuthRequestId, 
+            call.appAuthToken, call.appAuthCallsign)) {
+            call.setState(Call::State::STATE_APPAUTH_WAIT, APPAUTH_TIMEOUT_MS,
+                Call::State::STATE_APPAUTH_FAILED);
+        } else {
+            _log.error("Call %u unable to start app token validation", call.localCallId);
+            call.setState(Call::State::STATE_APPAUTH_FAILED);
+        }
+    }
+    else if (call.state == Call::State::STATE_APPAUTH_WAIT) {
+        fixedstring validatedCallsign;
+        AppAuthValidator::Status st = _appAuthValidator->getResult(call.appAuthRequestId, 
+            validatedCallsign);
+        if (st == AppAuthValidator::Status::VALID) {
+            call.appAuthRequestId = 0;
+            _log.info("Call %u app token valid for %s", call.localCallId, 
+                validatedCallsign.c_str());
+            // Like ASL3, the callsign becomes the identity of the caller
+            call.remoteNumber = validatedCallsign;
+            call.callingName = validatedCallsign;
+            call.isRegistered = true;
+            call.setState(Call::State::STATE_CALLER_VALIDATED);
+        }
+        else if (st == AppAuthValidator::Status::INVALID) {
+            call.appAuthRequestId = 0;
+            call.setState(Call::State::STATE_APPAUTH_FAILED);
+        }
+    }
+    else if (call.state == Call::State::STATE_APPAUTH_FAILED) {
+        if (call.appAuthRequestId != 0 && _appAuthValidator) {
+            _appAuthValidator->cancel(call.appAuthRequestId);
+            call.appAuthRequestId = 0;
+        }
+        if (_authenticationRequired) {
+            _log.info("Call %u app token validation failed", call.localCallId);
+            _rejectCall(call, "Authentication failed");
+        } else {
+            _log.info("Call %u app token validation failed, not required", call.localCallId);
+            call.setState(Call::State::STATE_CALLER_VALIDATED);
+        }
+    }
     else if (call.state == Call::State::STATE_CALLER_VALIDATED) {
 
         // Send the ACCEPT message
@@ -2468,6 +2565,7 @@ void LineIAX2::_progressCallee(Call& call) {
         payload.codec = call.codec;
         payload.startMs = call.localStartMs;
         payload.sourceAddrValidated = call.isRegistered;
+        payload.appClient = call.appClient;
         strcpyLimited(payload.localNumber, call.localNumber.c_str(), sizeof(payload.localNumber));
         strcpyLimited(payload.remoteNumber, call.remoteNumber.c_str(), sizeof(payload.remoteNumber));
         payload.originated = false;
@@ -2662,7 +2760,10 @@ void LineIAX2::consume(const Message& msg) {
                         voiceFrame.setHeader(call.localCallId, call.remoteCallId, 
                             elapsed, 
                             call.outSeqNo, call.expectedInSeqNo, 
-                            FrameType::IAX2_TYPE_VOICE, call.codec);
+                            FrameType::IAX2_TYPE_VOICE, 
+                            // CODECs >= 0x80 (ex: SLIN16, G722) must be
+                            // compressed to fit into the subclass byte
+                            compressCodecSubclass(call.codec));
                         voiceFrame.setBody(msg.body(), msg.size());
                         line->_sendFrameToPeer(voiceFrame, call);
                     }
@@ -2746,6 +2847,53 @@ void LineIAX2::_sendACK(uint32_t timeStamp, Call& call) {
         IAXSubclass::IAX2_SUBCLASS_IAX_ACK);
     // Go straight to the wire, bypassing the retransmit buffer
     _sendFrameToPeer(frame, (const sockaddr&)call.peerAddr);
+}
+
+void LineIAX2::_rejectCall(Call& call, const char* cause) {
+    IAX2FrameFull frame;
+    frame.setHeader(call.localCallId, call.remoteCallId, 
+        call.dispenseElapsedMs(_clock), 
+        call.outSeqNo, call.expectedInSeqNo, 
+        FrameType::IAX2_TYPE_IAX, IAXSubclass::IAX2_SUBCLASS_IAX_REJECT);
+    // See section 8.6.21
+    frame.addIE_str(0x31, cause);
+    _sendFrameToPeer(frame, call);
+    _terminateCall(call);
+}
+
+void LineIAX2::_sendMD5AuthReq(Call& call) {
+    // MD5 method
+    call.authMethod = 0x02;
+    // Make a challenge nonce that uses some things that are unique to the call
+    char challenge[32];
+    snprintf(challenge, sizeof(challenge), "%u%u", call.localCallId, call.localStartMs);
+    call.authChallenge = challenge;
+
+    IAX2FrameFull authreqFrame;
+    authreqFrame.setHeader(call.localCallId, call.remoteCallId, 
+        call.dispenseElapsedMs(_clock), 
+        call.outSeqNo, call.expectedInSeqNo, 
+        FrameType::IAX2_TYPE_IAX, IAXSubclass::IAX2_SUBCLASS_IAX_AUTHREQ);
+    authreqFrame.addIE_uint16(IEType::IAX2_IE_AUTHMETHODS, call.authMethod);
+    authreqFrame.addIE_str(IEType::IAX2_IE_CHALLENGE, call.authChallenge);
+    // Asterisk sends the USERNAME back in the AUTHREQ
+    if (!call.callUser.empty())
+        authreqFrame.addIE_str(IEType::IAX2_IE_USERNAME, call.callUser);
+
+    _sendFrameToPeer(authreqFrame, call);
+
+    call.setState(Call::State::STATE_AUTHREP_WAIT_1, CALL_INITIATION_TIMEOUS_MS,
+        Call::State::STATE_TERMINATED);
+    call.active = true;
+}
+
+bool LineIAX2::_getCodecIE(const IAX2FrameFull& frame, uint8_t wideId, 
+    uint8_t narrowId, uint32_t* codecs) {
+    uint8_t wide[9];
+    int wideLen = frame.getIE_raw(wideId, wide, sizeof(wide));
+    if (wideLen > 0 && parseCodecWide(wide, (unsigned)wideLen, codecs))
+        return true;
+    return frame.getIE_uint32(narrowId, codecs);
 }
 
 void LineIAX2::_sendREJECT(uint16_t destCall, const sockaddr& peerAddr, const char* cause) {
@@ -3199,6 +3347,10 @@ void LineIAX2::Call::reset() {
     _rxSeqErrorCount = 0;
     authMethod = 0;
     authChallenge.clear();
+    appClient = false;
+    appAuthToken[0] = 0;
+    appAuthCallsign[0] = 0;
+    appAuthRequestId = 0;
 }
 
 void LineIAX2::Call::setState(State s) {

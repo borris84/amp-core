@@ -73,6 +73,8 @@ enum ControlSubclass {
 };
 
 // See: https://datatracker.ietf.org/doc/html/rfc5457#page-19
+// These bit positions match Asterisk's AST_FORMAT_xxx bitfield
+// (include/asterisk/format_compatibility.h).
 enum CODECType {
     IAX2_CODEC_UNKNOWN    = 0,
     IAX2_CODEC_GSM_FULL   = 0x00000002,
@@ -82,6 +84,8 @@ enum CODECType {
     IAX2_CODEC_G726_AAL2  = 0x00000010,
     // (8k 16-bit SLIN, little endian)
     IAX2_CODEC_SLIN_8K    = 0x00000040,
+    // 16k G.722 at 64 kbit/s (one byte per pair of 16k samples)
+    IAX2_CODEC_G722       = 0x00001000,
     // (16k 16-bit SLIN, little endian)
     IAX2_CODEC_SLIN_16K   = 0x00008000,
     // (48k 16-bit SLIN, little endian)
@@ -101,6 +105,12 @@ bool isCodecSupported(CODECType type);
  * @returns The bitmask of all of the CODECs supported.
  */
 uint32_t getSupportedCodecs();
+
+/**
+ * Enables/disables an optional CODEC process-wide. At the moment the
+ * only optional CODEC is G.722, which is disabled by default.
+ */
+void setCodecEnabled(CODECType type, bool enabled);
 
 /**
  * Fills in the array with the CODECs that are supported in preference order.
@@ -141,7 +151,10 @@ enum IEType {
     IAX2_IE_TARGET_ADDR2 = 0x22,
     IAX2_IE_CAUSECODE = 0x2a,
     IAX2_IE_CODEC_PREFS = 0x2d,
-    // NOTE: NOT IN IANA!
+    // NOTE: NOT IN IANA! These are Asterisk's CAPABILITY2/FORMAT2: a
+    // one-byte version (0) followed by a 64-bit big-endian bitfield.
+    // IMPORTANT: Asterisk lets these override the 32-bit versions.
+    IAX2_IE_CAPABILITY_WIDE = 0x37,
     IAX2_IE_FORMAT_WIDE = 0x38
 };
 
@@ -154,12 +167,42 @@ enum IEType {
 int compareSeqWrap(uint8_t a, uint8_t b);
 
 /**
- * Converts the CODEC letter ("A offset") to a 32-bit CODEC mask.
- * @returns The CODEC mask, or zero on fail.
+ * Converts the CODEC letter used in the CODEC_PREFS IE to a 32-bit CODEC mask.
+ *
+ * IMPORTANT: The letter is NOT the bit position of the CODEC. It is a 1-based
+ * index (offset from 'A') into Asterisk's iax2_supported_formats[] table
+ * (channels/iax2/codec_pref.c), whose order differs from the bitfield
+ * order (ex: SLIN16 is 'P', ILBC is 'M').
+ *
+ * @returns The CODEC mask, or zero on fail (or if the CODEC can't be
+ * represented in 32 bits).
  */
 uint32_t codecLetterToMask(char letter);
 
+/**
+ * The inverse of codecLetterToMask().
+ * @returns The letter, or 0 if the CODEC has no letter.
+ */
 char codecMaskToLetter(uint32_t mask);
+
+/**
+ * Builds a CODEC_PREFS string for the supported CODECs in our
+ * preference order.
+ * @returns The length of the string written (null-terminated).
+ */
+unsigned makeCodecPrefString(char* buf, unsigned bufCapacity);
+
+/**
+ * Converts a single CODEC to the value that goes in the one-byte
+ * subclass of a full VOICE frame. Per Asterisk/RFC 5456 Section 8.1.1,
+ * values >= 0x80 are sent as 0x80 | log2(codec).
+ */
+uint8_t compressCodecSubclass(uint32_t codec);
+
+/**
+ * The inverse of compressCodecSubclass().
+ */
+uint32_t uncompressCodecSubclass(uint8_t subclass);
 
 /**
  * Takes the string that is returned in the CODEC_PREF information element (0x2b)
@@ -191,10 +234,44 @@ uint32_t assignCodec(uint32_t callerCapability,
     const uint32_t* calleePrefs, unsigned calleePrefsLen);
 
 /**
- * Provides the "wide" representation of the CODEC.
+ * Provides the "wide" representation of the CODEC (version byte 0
+ * followed by the 64-bit bitfield in network byte order).
  * @param buf Must be a 9-byte buffer.
  */
 void fillCodecWide(uint32_t codecs, char* buf);
+
+/**
+ * Parses the "wide" CODEC representation (CAPABILITY2/FORMAT2 IEs).
+ * Bits above 31 are dropped since we don't support any of those CODECs.
+ * @returns true if the buffer was a valid version 0 representation.
+ */
+bool parseCodecWide(const uint8_t* buf, unsigned len, uint32_t* codecs);
+
+/**
+ * Parses the CALLING_NAME sent by an app using AllStarLink App Authentication
+ * (ASL002). The format is TOKEN/CALLSIGN. A legacy WebTransceiver client 
+ * sends only the TOKEN. The callsign is normalized to upper case.
+ *
+ * The characters are restricted to [A-Za-z0-9] since these values end up
+ * in the query string of the validation URL.
+ *
+ * @returns true if the value is well-formed.
+ */
+bool parseAppAuthCallingName(const char* callingName, 
+    char* token, unsigned tokenCapacity,
+    char* callsign, unsigned callsignCapacity);
+
+/**
+ * Interprets the body returned by the ASL API appauth/validate endpoint
+ * using the same rules as the ASL3 [allstar-public] dialplan: the response 
+ * must start with OHYES, followed by the callsign, which must match the 
+ * callsign that was presented (case-insensitive) unless none was presented.
+ *
+ * @param validatedCallsign Receives the (upper case) callsign on success.
+ * @returns true if the caller is validated.
+ */
+bool interpretAppAuthResponse(const char* response, const char* presentedCallsign,
+    char* validatedCallsign, unsigned validatedCallsignCapacity);
 
 /**
  * A structure that holds the result of a parse of an IAX URL

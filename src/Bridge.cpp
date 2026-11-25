@@ -295,6 +295,7 @@ void Bridge::consume(const Message& msg) {
                 payload.sourceAddrValidated, _defaultMode, 
                 payload.remoteNumber, payload.permanent, useKerchunkFilter,
                 _kerchunkFilterDelayMs);
+            call.setAppClient(payload.appClient);
 
             // Play the greeting to the new caller, but not for calls that 
             // we originated in the first place
@@ -305,7 +306,7 @@ void Bridge::consume(const Message& msg) {
 
             // Announce the new connection to all of the *other* active calls
             // who may have commanded this connection.
-            string prompt = "Node ";
+            string prompt = payload.appClient ? "User " : "Node ";
             prompt += addSpaces(payload.remoteNumber);
             prompt += " connected.";
             

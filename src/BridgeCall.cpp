@@ -157,6 +157,7 @@ void BridgeCall::reset() {
     // Default to scale of 1 in q11 format
     _echoScale = 2048;
     _sourceAddrValidated = false;
+    _appClient = false;
     _permanent = false;
     _callStartMs = 0;
     _callMaxDurationMs = 0;
@@ -769,7 +770,7 @@ void BridgeCall::_parrotAudioRateTick(uint32_t tickMs) {
 
         setOutputTalkerId(PARROT_TALKER_ID);
 
-        if (!_netTestBindAddr.empty()) {
+        if (!_netTestBindAddr.empty() && !_appClient) {
             // Launch the network test for this new connection
             Poker::Request req;
             strcpyLimited(req.bindAddr, _netTestBindAddr.c_str(), sizeof(_netTestBindAddr));
@@ -821,7 +822,13 @@ void BridgeCall::_parrotAudioRateTick(uint32_t tickMs) {
         // the telemetry pass.
         if (_clock->isPast(_parrotStateStartMs + PARROT_GREETING_PAUSE_MS)) {
             string prompt;
-            if (!_sourceAddrValidated) 
+            if (_appClient) {
+                if (_sourceAddrValidated)
+                    prompt += "App user authenticated. ";
+                else 
+                    prompt += "App user not authenticated. ";
+            }
+            else if (!_sourceAddrValidated) 
                 prompt += "Node is unregistered. ";
             else {
                 if (_netTestResult.code == 0) {
@@ -845,6 +852,8 @@ void BridgeCall::_parrotAudioRateTick(uint32_t tickMs) {
                 prompt += "CODEC is 8K linear. ";
             else if (_bridgeIn.getCodec() == CODECType::IAX2_CODEC_G726_AAL2) 
                 prompt += "CODEC is G 726. ";
+            else if (_bridgeIn.getCodec() == CODECType::IAX2_CODEC_G722) 
+                prompt += "CODEC is G 722. ";
 
             prompt += "Ready to record.";
 
@@ -1068,7 +1077,7 @@ void BridgeCall::_loadSweep(std::queue<PCM16Frame>& queue) {
         _loadCw(0.5, 800, 2, queue);
     }
     unsigned upperHz = 4000;
-    if (_bridgeIn.getCodec() == CODECType::IAX2_CODEC_SLIN_16K) 
+    if (codecSampleRate(_bridgeIn.getCodec()) >= 16000) 
         upperHz = 8000;
     // Sweep
     for (unsigned f = 0; f < upperHz; f += 100)

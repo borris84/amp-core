@@ -605,6 +605,7 @@ add_executable(unit-test
   src/Transcoder_SLIN_16K.cpp
   src/Transcoder_SLIN_8K.cpp
   src/Transcoder_G726.cpp
+  src/Transcoder_G722.cpp
   src/WebUi_2.cpp
   src/voter/VoterUtil.cpp
   kc1fsz-tools-cpp/src/Common.cpp
@@ -623,6 +624,8 @@ add_executable(unit-test
   g726-codec/src/g711.c
   g726-codec/src/g72x.c
   g726-codec/src/g726_32.c
+  libg722/g722_encode.c
+  libg722/g722_decode.c
 )
 target_compile_options(unit-test PRIVATE -fstack-protector-all -Wall -Wpedantic -g -O3 -mtune=native)
 
@@ -638,6 +641,7 @@ target_include_directories(unit-test PRIVATE
   json/include
   argparse/include
   g726-codec/src
+  libg722
   cpp-httplib
   base64.c
   sound-map/include
@@ -667,6 +671,9 @@ target_include_directories(voter-test PRIVATE kc1fsz-tools-cpp/include)
 add_executable(codec-assignment-test
   src/tests/codec-assignment-test.cpp
   src/IAX2Util.cpp
+  src/Transcoder_G722.cpp
+  libg722/g722_encode.c
+  libg722/g722_decode.c
   kc1fsz-tools-cpp/src/Common.cpp
   kc1fsz-tools-cpp/src/NetUtils.cpp
   kc1fsz-tools-cpp/src/StdPollTimer.cpp
@@ -676,6 +683,7 @@ add_executable(codec-assignment-test
 target_include_directories(codec-assignment-test PRIVATE src)
 target_include_directories(codec-assignment-test PRIVATE include)
 target_include_directories(codec-assignment-test PRIVATE kc1fsz-tools-cpp/include)
+target_include_directories(codec-assignment-test PRIVATE libg722)
 
 # ----- sa818-config
 

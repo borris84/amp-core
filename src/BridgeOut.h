@@ -28,6 +28,7 @@
 #include "Transcoder_SLIN_16K.h"
 #include "Transcoder_SLIN_8K.h"
 #include "Transcoder_G726.h"
+#include "Transcoder_G722.h"
 
 namespace kc1fsz {
 
@@ -59,6 +60,7 @@ public:
         _transcoder1c.reset(); 
         _transcoder1d.reset(); 
         _transcoder1e.reset(); 
+        _transcoder1f.reset(); 
         _resampler.reset(); 
         _lastActivityMs = 0;
     }
@@ -79,6 +81,7 @@ private:
     Transcoder_SLIN_16K _transcoder1c;
     Transcoder_SLIN_8K _transcoder1d;
     Transcoder_G726 _transcoder1e;
+    Transcoder_G722 _transcoder1f;
     amp::Resampler _resampler;
     uint64_t _lastActivityMs;
 };

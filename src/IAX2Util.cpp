@@ -131,12 +131,32 @@ int compareSeqWrap(uint8_t a, uint8_t b) {
 }
 
 /**
+ * The CODECs that are always available.
+ */
+static const uint32_t BASE_CODECS = CODECType::IAX2_CODEC_G711_ULAW | 
+    CODECType::IAX2_CODEC_SLIN_8K | CODECType::IAX2_CODEC_SLIN_16K | 
+    CODECType::IAX2_CODEC_G726_AAL2;
+/**
+ * The CODECs that can be turned on/off via setCodecEnabled().
+ */
+static const uint32_t OPTIONAL_CODECS = CODECType::IAX2_CODEC_G722;
+
+static uint32_t enabledCodecs = BASE_CODECS;
+
+/**
  * @returns The bitmask of all of the CODECs supported.
  */
-
 uint32_t getSupportedCodecs() { 
-    return CODECType::IAX2_CODEC_G711_ULAW | CODECType::IAX2_CODEC_SLIN_8K | 
-        CODECType::IAX2_CODEC_SLIN_16K | CODECType::IAX2_CODEC_G726_AAL2;
+    return enabledCodecs;
+}
+
+void setCodecEnabled(CODECType type, bool enabled) {
+    if ((type & OPTIONAL_CODECS) == 0)
+        return;
+    if (enabled)
+        enabledCodecs |= type;
+    else 
+        enabledCodecs &= ~(uint32_t)type;
 }
 
 bool isCodecSupported(CODECType type) {
@@ -150,6 +170,9 @@ unsigned maxVoiceFrameSize(CODECType type) {
         return 160;
     else if (type == CODECType::IAX2_CODEC_SLIN_8K)
         return 160 * 2;
+    else if (type == CODECType::IAX2_CODEC_G722)
+        // 64 kbit/s * 20ms
+        return 160;
     else if (type == CODECType::IAX2_CODEC_SLIN_16K)
         return 160 * 2 * 2;
     else 
@@ -163,6 +186,8 @@ unsigned codecSampleRate(CODECType type) {
         return 8000;
     else if (type == CODECType::IAX2_CODEC_SLIN_8K)
         return 8000;
+    else if (type == CODECType::IAX2_CODEC_G722)
+        return 16000;
     else if (type == CODECType::IAX2_CODEC_SLIN_16K)
         return 16000;
     else if (type == CODECType::IAX2_CODEC_SLIN_48K)
@@ -178,15 +203,18 @@ unsigned codecSampleRate(CODECType type) {
  * @returns The number of CODECs currently supported.
  */
 unsigned getCodecPrefs(uint32_t* codecs, unsigned codecsCapacity) {
+    // Wideband first, lossless before lossy
+    static const uint32_t order[] = {
+        CODECType::IAX2_CODEC_SLIN_16K,
+        CODECType::IAX2_CODEC_G722,
+        CODECType::IAX2_CODEC_SLIN_8K,
+        CODECType::IAX2_CODEC_G711_ULAW,
+        CODECType::IAX2_CODEC_G726_AAL2
+    };
     unsigned count = 0;
-    if (codecsCapacity > 0)
-        codecs[count++] = CODECType::IAX2_CODEC_SLIN_16K;
-    if (codecsCapacity > 1)
-        codecs[count++] = CODECType::IAX2_CODEC_SLIN_8K;
-    if (codecsCapacity > 2)
-        codecs[count++] = CODECType::IAX2_CODEC_G711_ULAW;
-    if (codecsCapacity > 3)
-        codecs[count++] = CODECType::IAX2_CODEC_G726_AAL2;
+    for (unsigned i = 0; i < sizeof(order) / sizeof(order[0]) && count < codecsCapacity; i++)
+        if (order[i] & getSupportedCodecs())
+            codecs[count++] = order[i];
     return count;
 }
 
@@ -194,27 +222,86 @@ unsigned codecBlockSize(CODECType type) {
     return codecSampleRate(type) / 50;
 }
 
-static const char baseAscii = 'B';
+/**
+ * This is the 32-bit portion of Asterisk's iax2_supported_formats[] table
+ * (channels/iax2/codec_pref.c). The CODEC_PREFS letter is 'A' + the 1-based
+ * index in this table. Asterisk comment: "Due to a misunderstanding in how 
+ * codec preferences are stored, this list starts at 'B', not 'A'".
+ *
+ * Entries that are 0 are either reserved or CODECs that live above bit 31
+ * (SPEEX16, G719, OPUS, ...) which we don't support.
+ */
+static const uint32_t prefOrder[] = {
+    0x00000001, // 'B' G723
+    0x00000002, // 'C' GSM
+    0x00000004, // 'D' ULAW
+    0x00000008, // 'E' ALAW
+    0x00000800, // 'F' G726 (RFC 3551 packing, not AAL2)
+    0x00000020, // 'G' ADPCM
+    0x00000040, // 'H' SLIN
+    0x00000080, // 'I' LPC10
+    0x00000100, // 'J' G729
+    0x00000200, // 'K' SPEEX
+    0,          // 'L' SPEEX16 (bit 33)
+    0x00000400, // 'M' ILBC
+    0x00000010, // 'N' G726_AAL2
+    0x00001000, // 'O' G722
+    0x00008000, // 'P' SLIN16
+    // Everything after this is video/text/etc.
+};
+static const unsigned prefOrderLen = sizeof(prefOrder) / sizeof(prefOrder[0]);
 
 char codecMaskToLetter(uint32_t mask) {
-    char letter = baseAscii;
-    for (unsigned i = 0; i < 32 && (mask & 1) == 0; i++) {
-        letter++;
-        mask = mask >> 1;
-    }
-    return letter;
+    if (mask == 0)
+        return 0;
+    for (unsigned i = 0; i < prefOrderLen; i++)
+        if (prefOrder[i] == mask)
+            return (char)('B' + i);
+    return 0;
 }
 
 uint32_t codecLetterToMask(char letter) {
-    // I found this comment in the Asterisk source code:
-    //
-    // "Shift an audio codec preference list up or down 65 bytes so that it becomes 
-    // an ASCII string. NOTE: Due to a misunderstanding in how codec preferences are 
-    // stored, this list starts at 'B', not 'A'.  For backwards compatibility reasons, 
-    // this cannot change.
-    if (letter < baseAscii)        
+    if (letter < 'B')
         return 0;
-    return 1 << ((unsigned)letter - (unsigned)baseAscii);
+    unsigned ix = (unsigned)letter - (unsigned)'B';
+    if (ix >= prefOrderLen)
+        return 0;
+    return prefOrder[ix];
+}
+
+unsigned makeCodecPrefString(char* buf, unsigned bufCapacity) {
+    if (bufCapacity == 0)
+        return 0;
+    uint32_t prefs[16];
+    const unsigned prefCount = getCodecPrefs(prefs, 16);
+    unsigned len = 0;
+    for (unsigned i = 0; i < prefCount && len + 1 < bufCapacity; i++) {
+        char c = codecMaskToLetter(prefs[i]);
+        if (c)
+            buf[len++] = c;
+    }
+    buf[len] = 0;
+    return len;
+}
+
+uint8_t compressCodecSubclass(uint32_t codec) {
+    if (codec < 0x80)
+        return (uint8_t)codec;
+    // Find the highest bit that is set 
+    for (unsigned i = 31; i >= 7; i--)
+        if (codec & (1UL << i))
+            return 0x80 | (uint8_t)i;
+    return 0;
+}
+
+uint32_t uncompressCodecSubclass(uint8_t subclass) {
+    if (subclass & 0x80) {
+        unsigned shift = subclass & 0x7f;
+        if (shift > 31)
+            return 0;
+        return 1UL << shift;
+    }
+    return subclass;
 }
 
 unsigned parseCodecPref(const char* prefList, uint32_t* codecs, unsigned codecsCapacity) {
@@ -248,19 +335,104 @@ uint32_t assignCodec(uint32_t callerCapability,
 }
 
 void fillCodecWide(uint32_t types, char* buf) {
-    memset(buf, 0, 9);
-    if (types & 0x00000002)     
-        buf[8] |= 2;
-    if (types & 0x00000004)     
-        buf[8] |= 4;
-    if (types & 0x00000008)     
-        buf[8] |= 8;
-    if (types & 0x00000010)     
-        buf[7] |= 1;
-    if (types & 0x00000040)     
-        buf[7] |= 4;
-    if (types & 0x00008000)     
-        buf[5] |= 8;  
+    // Version
+    buf[0] = 0;
+    // 64-bit bitfield, network byte order. We have nothing above bit 31.
+    buf[1] = buf[2] = buf[3] = buf[4] = 0;
+    buf[5] = (char)((types >> 24) & 0xff);
+    buf[6] = (char)((types >> 16) & 0xff);
+    buf[7] = (char)((types >> 8) & 0xff);
+    buf[8] = (char)(types & 0xff);
+}
+
+bool parseCodecWide(const uint8_t* buf, unsigned len, uint32_t* codecs) {
+    if (len != 9 || buf[0] != 0)
+        return false;
+    *codecs = ((uint32_t)buf[5] << 24) | ((uint32_t)buf[6] << 16) |
+        ((uint32_t)buf[7] << 8) | (uint32_t)buf[8];
+    return true;
+}
+
+static bool isAlnumAscii(char c) {
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
+}
+
+static char toUpperAscii(char c) {
+    return (c >= 'a' && c <= 'z') ? (char)(c - 'a' + 'A') : c;
+}
+
+bool parseAppAuthCallingName(const char* callingName, 
+    char* token, unsigned tokenCapacity,
+    char* callsign, unsigned callsignCapacity) {
+
+    if (tokenCapacity == 0 || callsignCapacity == 0)
+        return false;
+    token[0] = 0;
+    callsign[0] = 0;
+
+    // Per ASL002 all strings are at most 64 characters
+    const unsigned maxLen = 64;
+    unsigned i = 0;
+    unsigned tokenLen = 0;
+    for (; callingName[i] != 0 && callingName[i] != '/'; i++) {
+        if (!isAlnumAscii(callingName[i]) || tokenLen >= maxLen || 
+            tokenLen + 1 >= tokenCapacity)
+            return false;
+        token[tokenLen++] = callingName[i];
+    }
+    token[tokenLen] = 0;
+    if (tokenLen == 0)
+        return false;
+
+    if (callingName[i] == '/') {
+        i++;
+        unsigned callsignLen = 0;
+        for (; callingName[i] != 0; i++) {
+            if (!isAlnumAscii(callingName[i]) || callsignLen >= maxLen || 
+                callsignLen + 1 >= callsignCapacity)
+                return false;
+            callsign[callsignLen++] = toUpperAscii(callingName[i]);
+        }
+        callsign[callsignLen] = 0;
+    }
+    return true;
+}
+
+bool interpretAppAuthResponse(const char* response, const char* presentedCallsign,
+    char* validatedCallsign, unsigned validatedCallsignCapacity) {
+
+    if (validatedCallsignCapacity == 0)
+        return false;
+    validatedCallsign[0] = 0;
+
+    // Anything that doesn't start with OHYES is a failure (this includes 
+    // the empty string and "?")
+    if (strncmp(response, "OHYES", 5) != 0)
+        return false;
+
+    // The callsign follows. Stop at any whitespace/control character.
+    const char* p = response + 5;
+    unsigned len = 0;
+    for (; *p != 0 && isAlnumAscii(*p); p++) {
+        if (len + 1 >= validatedCallsignCapacity)
+            return false;
+        validatedCallsign[len++] = toUpperAscii(*p);
+    }
+    validatedCallsign[len] = 0;
+    if (len == 0)
+        return false;
+
+    // Legacy clients don't present a callsign, so we take the API's word
+    if (presentedCallsign == 0 || presentedCallsign[0] == 0)
+        return true;
+
+    // Otherwise the callsigns must match
+    if (strlen(presentedCallsign) != len)
+        return false;
+    for (unsigned i = 0; i < len; i++)
+        if (toUpperAscii(presentedCallsign[i]) != validatedCallsign[i])
+            return false;
+    return true;
 }
 
 IAXURIParameters parseIAXURI(const char* uri) {
