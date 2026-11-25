@@ -160,6 +160,10 @@ void ConfigPoller::_populateDefaults(json& j) {
     if (!j.contains("favorites"))
         j["favorites"] = "2002:ASL Parrot,61057:AMP Parrot,27339:East Coast Reflector";
     setDefault(j, "kfnodes", "");
+    // Accept calls from apps using ASL App Authentication (opt-in)
+    setDefault(j, "appAuth", "0");
+    // Offer the optional G.722 CODEC
+    setDefault(j, "codecG722", "0");
     if (!j.contains("kfdelay"))
         j["kfdelay"] = "2000";
     if (!j.contains("callsign"))

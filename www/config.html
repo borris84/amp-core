@@ -146,6 +146,18 @@
                     <label for="config_echogain">Sidetone Gain (dB):</label>
                     <input type="number" id="config_echogain" name="echogain"/>
 
+                    <label for="config_appAuth">App Connections (ASL App Authentication):</label>
+                    <select id="config_appAuth" name="appAuth">
+                        <option value="0">Disabled</option>
+                        <option value="1">Enabled</option>
+                    </select>
+
+                    <label for="config_codecG722">G.722 CODEC:</label>
+                    <select id="config_codecG722" name="codecG722">
+                        <option value="0">Disabled</option>
+                        <option value="1">Enabled</option>
+                    </select>
+
                     <label for="config_privateKey">Private Key (ED25519):</label>
                     <input type="text" name="privateKey" maxlength="64" id="config_privateKey"/>
 
