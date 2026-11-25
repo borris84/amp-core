@@ -806,6 +806,18 @@ void LineIAX2::_processFullFrame(const uint8_t* potentiallyDangerousBuf,
 
             // What CODECs are supported by the caller?
             uint32_t capableCodecs = 0;
+            // NOTE: The 32-bit IE is used since it is correct from all peers.
+            // A mismatched 64-bit IE identifies a pre-2026-11 Ampersand peer
+            // which also uses a different CODEC_PREFS mapping.
+            bool legacyAmpersandPeer = false;
+            {
+                uint8_t wide[9];
+                uint32_t narrow = 0, wideCodecs = 0;
+                int wideLen = frame.getIE_raw(0x37, wide, sizeof(wide));
+                if (wideLen > 0 && parseCodecWide(wide, (unsigned)wideLen, &wideCodecs) &&
+                    frame.getIE_uint32(IEType::IAX2_IE_CAPABILITY, &narrow))
+                    legacyAmpersandPeer = isLegacyAmpersandWideCodec(narrow, wideCodecs);
+            }
             if (!frame.getIE_uint32(IEType::IAX2_IE_CAPABILITY, &capableCodecs)) {
                 _log.error("No CODEC capability provided");
                 _sendREJECT(destCallId, peerAddr, "CODEC capability missing");
@@ -837,14 +849,16 @@ void LineIAX2::_processFullFrame(const uint8_t* potentiallyDangerousBuf,
 
             // Get the caller's CODEC preferences (optional). This is represented a 
             // string which gets converted to a list of masks.
-            char codecPrefs[8] = { 0 };
-            frame.getIE_str(IEType::IAX2_IE_CODEC_PREFS, codecPrefs, 8);
+            // NOTE: Asterisk can send up to 32 preferences, and the IE 
+            // read fails entirely if the buffer is too small.
+            char codecPrefs[65] = { 0 };
+            frame.getIE_str(IEType::IAX2_IE_CODEC_PREFS, codecPrefs, sizeof(codecPrefs));
             //_log.info("Caller CODEC preferences [%s]", codecPrefs);
 
-            const unsigned preferredCodecsCapacity = 8;
+            const unsigned preferredCodecsCapacity = 64;
             uint32_t preferredCodecs[preferredCodecsCapacity];
             const unsigned preferredCodecCount = parseCodecPref(codecPrefs, 
-                preferredCodecs, preferredCodecsCapacity);
+                preferredCodecs, preferredCodecsCapacity, legacyAmpersandPeer);
 
             // Here we assign the CODEC based on what the caller said they 
             // could handle.
@@ -1587,7 +1601,7 @@ void LineIAX2::_processFullFrameInCall(const IAX2FrameFull& frame, Call& call,
             // #### TODO: NEED TO GET THE RIGHT TIMESTAMP!
             // #### TODO: NEED TO GET THE RIGHT TIMESTAMP!
             MessageWrapper voiceMsg(Message::Type::AUDIO, call.codec,
-                vfs, frame.buf(), frame.getTimeStamp(), rxStampMs);
+                vfs, frame.buf() + 12, frame.getTimeStamp(), rxStampMs);
             voiceMsg.setSource(_busId, call.localCallId);
             voiceMsg.setDest(_destLineId, Message::UNKNOWN_CALL_ID);
             _bus.consume(voiceMsg);
@@ -2118,9 +2132,12 @@ bool LineIAX2::_progressCall(Call& call) {
             // be the first IE; the order of other IEs is unspecified. 
             frame.addIE_uint16(IEType::IAX2_IE_VERSION, 0x0002);
             frame.addIE_str(1, call.remoteNumber);
-            // CODECs are mapped to letters staring with "B". D means ulaw.
-            // This code means SLIN16, ULAW, G726_AAL2, SLIN8
-            frame.addIE_str(IEType::IAX2_IE_CODEC_PREFS, "QDFH", 3);
+            // CODECs are mapped to letters using Asterisk's codec preference 
+            // table (see codecLetterToMask()). Ex: "PHDN" means SLIN16, SLIN8,
+            // ULAW, G726_AAL2.
+            char codecPrefs[16];
+            makeCodecPrefString(codecPrefs, sizeof(codecPrefs));
+            frame.addIE_str(IEType::IAX2_IE_CODEC_PREFS, codecPrefs, strlen(codecPrefs));
             frame.addIE_str(2, call.localNumber);
             // Not sure what these are for?
             frame.addIE_uint8(38, 0x00);
@@ -2401,7 +2418,9 @@ void LineIAX2::consume(const Message& msg) {
                         voiceFrame.setHeader(call.localCallId, call.remoteCallId, 
                             elapsed, 
                             call.outSeqNo, call.expectedInSeqNo, 
-                            FrameType::IAX2_TYPE_VOICE, call.codec);
+                            FrameType::IAX2_TYPE_VOICE, 
+                            // CODECs >= 0x80 (ex: SLIN16) must be compressed
+                            compressCodecSubclass(call.codec));
                         voiceFrame.setBody(msg.body(), msg.size());
                         line->_sendFrameToPeer(voiceFrame, call);
                     }

@@ -190,33 +190,90 @@ unsigned codecBlockSize(CODECType type) {
     return codecSampleRate(type) / 50;
 }
 
-static const char baseAscii = 'B';
+/**
+ * This is the 32-bit portion of Asterisk's iax2_supported_formats[] table
+ * (channels/iax2/codec_pref.c). The CODEC_PREFS letter is 'A' + the 1-based
+ * index in this table, NOT the bit position. Asterisk comment: "Due to a 
+ * misunderstanding in how codec preferences are stored, this list starts 
+ * at 'B', not 'A'".
+ */
+static const uint32_t prefOrder[] = {
+    0x00000001, // 'B' G723
+    0x00000002, // 'C' GSM
+    0x00000004, // 'D' ULAW
+    0x00000008, // 'E' ALAW
+    0x00000800, // 'F' G726 (RFC 3551 packing, not AAL2)
+    0x00000020, // 'G' ADPCM
+    0x00000040, // 'H' SLIN
+    0x00000080, // 'I' LPC10
+    0x00000100, // 'J' G729
+    0x00000200, // 'K' SPEEX
+    0,          // 'L' SPEEX16 (bit 33)
+    0x00000400, // 'M' ILBC
+    0x00000010, // 'N' G726_AAL2
+    0x00001000, // 'O' G722
+    0x00008000, // 'P' SLIN16
+};
+static const unsigned prefOrderLen = sizeof(prefOrder) / sizeof(prefOrder[0]);
 
 char codecMaskToLetter(uint32_t mask) {
-    char letter = baseAscii;
-    for (unsigned i = 0; i < 32 && (mask & 1) == 0; i++) {
-        letter++;
-        mask = mask >> 1;
-    }
-    return letter;
+    if (mask == 0)
+        return 0;
+    for (unsigned i = 0; i < prefOrderLen; i++)
+        if (prefOrder[i] == mask)
+            return (char)('B' + i);
+    return 0;
 }
 
 uint32_t codecLetterToMask(char letter) {
-    // I found this comment in the Asterisk source code:
-    //
-    // "Shift an audio codec preference list up or down 65 bytes so that it becomes 
-    // an ASCII string. NOTE: Due to a misunderstanding in how codec preferences are 
-    // stored, this list starts at 'B', not 'A'.  For backwards compatibility reasons, 
-    // this cannot change.
-    if (letter < baseAscii)        
+    if (letter < 'B')
         return 0;
-    return 1 << ((unsigned)letter - (unsigned)baseAscii);
+    unsigned ix = (unsigned)letter - (unsigned)'B';
+    if (ix >= prefOrderLen)
+        return 0;
+    return prefOrder[ix];
 }
 
-unsigned parseCodecPref(const char* prefList, uint32_t* codecs, unsigned codecsCapacity) {
+unsigned makeCodecPrefString(char* buf, unsigned bufCapacity) {
+    if (bufCapacity == 0)
+        return 0;
+    uint32_t prefs[16];
+    const unsigned prefCount = getCodecPrefs(prefs, 16);
+    unsigned len = 0;
+    for (unsigned i = 0; i < prefCount && len + 1 < bufCapacity; i++) {
+        char c = codecMaskToLetter(prefs[i]);
+        if (c)
+            buf[len++] = c;
+    }
+    buf[len] = 0;
+    return len;
+}
+
+uint8_t compressCodecSubclass(uint32_t codec) {
+    if (codec < 0x80)
+        return (uint8_t)codec;
+    for (unsigned i = 31; i >= 7; i--)
+        if (codec & (1UL << i))
+            return 0x80 | (uint8_t)i;
+    return 0;
+}
+
+bool isLegacyAmpersandWideCodec(uint32_t narrow, uint32_t wideLow32) {
+    return narrow != wideLow32;
+}
+
+unsigned parseCodecPref(const char* prefList, uint32_t* codecs, unsigned codecsCapacity,
+    bool legacyAmpersand) {
     unsigned count = 0;
     while (*prefList != 0 && count < codecsCapacity) {
-        uint32_t codec = codecLetterToMask(*prefList);
+        uint32_t codec;
+        if (legacyAmpersand) {
+            // Old Ampersand mapping: 'B' + bit position
+            unsigned bit = (unsigned char)*prefList - (unsigned)'B';
+            codec = (*prefList >= 'B' && bit < 32) ? (1UL << bit) : 0;
+        } else {
+            codec = codecLetterToMask(*prefList);
+        }
         if (codec)
             codecs[count++] = codec;
         prefList++;
@@ -244,19 +301,22 @@ uint32_t assignCodec(uint32_t callerCapability,
 }
 
 void fillCodecWide(uint32_t types, char* buf) {
-    memset(buf, 0, 9);
-    if (types & 0x00000002)     
-        buf[8] |= 2;
-    if (types & 0x00000004)     
-        buf[8] |= 4;
-    if (types & 0x00000008)     
-        buf[8] |= 8;
-    if (types & 0x00000010)     
-        buf[7] |= 1;
-    if (types & 0x00000040)     
-        buf[7] |= 4;
-    if (types & 0x00008000)     
-        buf[5] |= 8;  
+    // Version 0 followed by the 64-bit bitfield in network byte order.
+    // IMPORTANT: Asterisk lets this override the 32-bit IE.
+    buf[0] = 0;
+    buf[1] = buf[2] = buf[3] = buf[4] = 0;
+    buf[5] = (char)((types >> 24) & 0xff);
+    buf[6] = (char)((types >> 16) & 0xff);
+    buf[7] = (char)((types >> 8) & 0xff);
+    buf[8] = (char)(types & 0xff);
+}
+
+bool parseCodecWide(const uint8_t* buf, unsigned len, uint32_t* codecs) {
+    if (len != 9 || buf[0] != 0)
+        return false;
+    *codecs = ((uint32_t)buf[5] << 24) | ((uint32_t)buf[6] << 16) |
+        ((uint32_t)buf[7] << 8) | (uint32_t)buf[8];
+    return true;
 }
 
 }
