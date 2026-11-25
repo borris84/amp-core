@@ -40,7 +40,22 @@ static void testPrefLetters() {
     assert(result[1] == CODECType::IAX2_CODEC_G711_ULAW);
     assert(result[2] == CODECType::IAX2_CODEC_SLIN_8K);
 
-    // A typical ASL3 preference list: ulaw, adpcm, gsm, slin16
+    // Pre-2026-11 Ampersand nodes sent "QDF" meaning SLIN16, ULAW, G726_AAL2
+    uint32_t legacy[3];
+    assert(parseCodecPref("QDF", legacy, 3, true) == 3);
+    assert(legacy[0] == CODECType::IAX2_CODEC_SLIN_16K);
+    assert(legacy[1] == CODECType::IAX2_CODEC_G711_ULAW);
+    assert(legacy[2] == CODECType::IAX2_CODEC_G726_AAL2);
+    // ... which Asterisk would interpret as (nothing), ULAW, G726 
+    assert(parseCodecPref("QDF", legacy, 3) == 2);
+
+    // Legacy detection: the old 64-bit encoding of the 32-bit value
+    const uint32_t legacyNarrow = 0x804c;
+    const uint32_t legacyWide = 0x08000000 | 0x400 | 0x100 | 0x4;
+    assert(isLegacyAmpersandWideCodec(legacyNarrow, legacyWide));
+    assert(!isLegacyAmpersandWideCodec(legacyNarrow, legacyNarrow));
+
+        // A typical ASL3 preference list: ulaw, adpcm, gsm, slin16
     uint32_t r2[8];
     assert(parseCodecPref("DGCP", r2, 8) == 4);
     assert(r2[3] == CODECType::IAX2_CODEC_SLIN_16K);

@@ -304,10 +304,22 @@ uint32_t uncompressCodecSubclass(uint8_t subclass) {
     return subclass;
 }
 
-unsigned parseCodecPref(const char* prefList, uint32_t* codecs, unsigned codecsCapacity) {
+bool isLegacyAmpersandWideCodec(uint32_t narrow, uint32_t wideLow32) {
+    return narrow != wideLow32;
+}
+
+unsigned parseCodecPref(const char* prefList, uint32_t* codecs, unsigned codecsCapacity,
+    bool legacyAmpersand) {
     unsigned count = 0;
     while (*prefList != 0 && count < codecsCapacity) {
-        uint32_t codec = codecLetterToMask(*prefList);
+        uint32_t codec;
+        if (legacyAmpersand) {
+            // Old Ampersand mapping: 'B' + bit position
+            unsigned bit = (unsigned char)*prefList - (unsigned)'B';
+            codec = (*prefList >= 'B' && bit < 32) ? (1UL << bit) : 0;
+        } else {
+            codec = codecLetterToMask(*prefList);
+        }
         if (codec)
             codecs[count++] = codec;
         prefList++;

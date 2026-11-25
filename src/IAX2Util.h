@@ -212,9 +212,20 @@ uint32_t uncompressCodecSubclass(uint8_t subclass);
  * CODECs ("A offset").
  * @param codecs The array where the result will be written
  * @param codecsCapacity The space available in codecs.
+ * @param legacyAmpersand Set to true if the peer is a pre-2026-11 Ampersand
+ *   node, which used 'B' + bit position instead of the Asterisk table.
  * @returns The number of CODECs in the resulting list.
  */
-unsigned parseCodecPref(const char* prefList, uint32_t* codecs, unsigned codecsCapacity);
+unsigned parseCodecPref(const char* prefList, uint32_t* codecs, unsigned codecsCapacity,
+    bool legacyAmpersand = false);
+
+/**
+ * Detects a pre-2026-11 Ampersand peer. Those nodes put an incorrect 
+ * encoding in the 64-bit CAPABILITY2/FORMAT2 IEs. Asterisk (and fixed 
+ * Ampersand nodes) always send a 64-bit value whose lower 32 bits match
+ * the 32-bit IE, so a mismatch identifies the legacy encoding.
+ */
+bool isLegacyAmpersandWideCodec(uint32_t narrow, uint32_t wideLow32);
 
 /**
  * Makes a decision about the CODEC that should be used for the call based 

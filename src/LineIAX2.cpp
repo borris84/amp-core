@@ -842,8 +842,11 @@ void LineIAX2::_processFullFrame(const uint8_t* potentiallyDangerousBuf,
 
             // What CODECs are supported by the caller?
             uint32_t capableCodecs = 0;
+            // Pre-2026-11 Ampersand peers are detected here since they use 
+            // a different CODEC_PREFS mapping
+            bool legacyAmpersandPeer = false;
             if (!_getCodecIE(frame, IEType::IAX2_IE_CAPABILITY_WIDE, 
-                    IEType::IAX2_IE_CAPABILITY, &capableCodecs)) {
+                    IEType::IAX2_IE_CAPABILITY, &capableCodecs, &legacyAmpersandPeer)) {
                 _log.error("No CODEC capability provided");
                 _sendREJECT(destCallId, peerAddr, "CODEC capability missing");
                 return;
@@ -882,7 +885,9 @@ void LineIAX2::_processFullFrame(const uint8_t* potentiallyDangerousBuf,
             const unsigned preferredCodecsCapacity = 64;
             uint32_t preferredCodecs[preferredCodecsCapacity];
             const unsigned preferredCodecCount = parseCodecPref(codecPrefs, 
-                preferredCodecs, preferredCodecsCapacity);
+                preferredCodecs, preferredCodecsCapacity, legacyAmpersandPeer);
+            if (legacyAmpersandPeer)
+                _log.info("Caller is using the legacy Ampersand CODEC encoding");
 
             // Here we assign the CODEC based on what the caller said they 
             // could handle.
@@ -2888,12 +2893,23 @@ void LineIAX2::_sendMD5AuthReq(Call& call) {
 }
 
 bool LineIAX2::_getCodecIE(const IAX2FrameFull& frame, uint8_t wideId, 
-    uint8_t narrowId, uint32_t* codecs) {
+    uint8_t narrowId, uint32_t* codecs, bool* legacyAmpersand) {
+    if (legacyAmpersand)
+        *legacyAmpersand = false;
+    uint32_t wideCodecs = 0;
     uint8_t wide[9];
     int wideLen = frame.getIE_raw(wideId, wide, sizeof(wide));
-    if (wideLen > 0 && parseCodecWide(wide, (unsigned)wideLen, codecs))
+    bool haveWide = wideLen > 0 && parseCodecWide(wide, (unsigned)wideLen, &wideCodecs);
+    if (frame.getIE_uint32(narrowId, codecs)) {
+        if (haveWide && legacyAmpersand)
+            *legacyAmpersand = isLegacyAmpersandWideCodec(*codecs, wideCodecs);
         return true;
-    return frame.getIE_uint32(narrowId, codecs);
+    }
+    if (haveWide) {
+        *codecs = wideCodecs;
+        return true;
+    }
+    return false;
 }
 
 void LineIAX2::_sendREJECT(uint16_t destCall, const sockaddr& peerAddr, const char* cause) {

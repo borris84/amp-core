@@ -617,12 +617,16 @@ private:
     void _sendMD5AuthReq(Call& call);
 
     /**
-     * Reads a CODEC IE, preferring the 64-bit Asterisk version (which is 
-     * what Asterisk itself does) and falling back to the 32-bit version.
+     * Reads a CODEC IE. The 32-bit version is preferred since it is 
+     * correct for all peers (pre-2026-11 Ampersand nodes send a bad 64-bit
+     * version), and all of our CODECs fit in 32 bits. The 64-bit version 
+     * is only used if the 32-bit version is missing.
+     * @param legacyAmpersand Optional, set to true if the 64-bit version 
+     *   was present and disagreed with the 32-bit version.
      * @returns true if either was found
      */
     static bool _getCodecIE(const IAX2FrameFull& frame, uint8_t wideId, 
-        uint8_t narrowId, uint32_t* codecs);
+        uint8_t narrowId, uint32_t* codecs, bool* legacyAmpersand = 0);
 
     /**
      * Sends a TEXT !!DISCONNECT!! to the peer. If nothing happens after a few seconds
