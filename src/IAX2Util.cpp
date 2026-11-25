@@ -357,6 +357,14 @@ static bool isAlnumAscii(char c) {
     return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
 }
 
+// Tokens are escaped when they are put into the validation URL, so 
+// anything printable is allowed except the TOKEN/CALLSIGN separator. 
+// NOTE: Legacy WebTransceiver tokens are a substring of the account 
+// password hash, so they aren't guaranteed to be alphanumeric.
+static bool isTokenChar(char c) {
+    return c > 0x20 && c < 0x7f && c != '/';
+}
+
 static char toUpperAscii(char c) {
     return (c >= 'a' && c <= 'z') ? (char)(c - 'a' + 'A') : c;
 }
@@ -375,7 +383,7 @@ bool parseAppAuthCallingName(const char* callingName,
     unsigned i = 0;
     unsigned tokenLen = 0;
     for (; callingName[i] != 0 && callingName[i] != '/'; i++) {
-        if (!isAlnumAscii(callingName[i]) || tokenLen >= maxLen || 
+        if (!isTokenChar(callingName[i]) || tokenLen >= maxLen || 
             tokenLen + 1 >= tokenCapacity)
             return false;
         token[tokenLen++] = callingName[i];

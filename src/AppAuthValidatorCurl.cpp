@@ -156,8 +156,9 @@ bool AppAuthValidatorCurl::_validate(const Request& req, string& validatedCallsi
     // Responsible for freeing resource on exit
     raiiholder<CURL> curlHolder(curl, [](CURL* c) { curl_easy_cleanup(c); });
 
-    // NOTE: The token/callsign were already restricted to [A-Za-z0-9] 
-    // by parseAppAuthCallingName(), but escape anyway.
+    // IMPORTANT: The token can contain URL-significant characters (legacy
+    // WebTransceiver tokens), so the escaping here is what keeps the 
+    // caller from injecting extra query parameters.
     char* t = curl_easy_escape(curl, req.token.c_str(), 0);
     char* u = curl_easy_escape(curl, req.callsign.c_str(), 0);
     string url = _url + "?t=" + (t ? t : "") + "&u=" + (u ? u : "");

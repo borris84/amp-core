@@ -252,8 +252,9 @@ bool parseCodecWide(const uint8_t* buf, unsigned len, uint32_t* codecs);
  * (ASL002). The format is TOKEN/CALLSIGN. A legacy WebTransceiver client 
  * sends only the TOKEN. The callsign is normalized to upper case.
  *
- * The characters are restricted to [A-Za-z0-9] since these values end up
- * in the query string of the validation URL.
+ * The callsign is restricted to [A-Za-z0-9]. The token may be any 
+ * printable ASCII other than '/' (legacy WebTransceiver tokens come from 
+ * the account's password hash), so it MUST be URL-escaped before use.
  *
  * @returns true if the value is well-formed.
  */

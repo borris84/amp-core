@@ -147,11 +147,17 @@ static void testAppAuth() {
     assert(strcmp(token, "abcdefABCDEF") == 0);
     assert(cs[0] == 0);
 
-    // Malformed: empty, URL injection, too long
+    // Legacy tokens come from a password hash and may have punctuation
+    assert(parseAppAuthCallingName("a$b.c+d=e1F2", token, sizeof(token), cs, sizeof(cs)));
+    assert(strcmp(token, "a$b.c+d=e1F2") == 0);
+    assert(cs[0] == 0);
+
+    // Malformed: empty, whitespace, bad callsign, too long
     assert(!parseAppAuthCallingName("", token, sizeof(token), cs, sizeof(cs)));
     assert(!parseAppAuthCallingName("/N0CALL", token, sizeof(token), cs, sizeof(cs)));
-    assert(!parseAppAuthCallingName("abc&u=X/N0CALL", token, sizeof(token), cs, sizeof(cs)));
+    assert(!parseAppAuthCallingName("abc def/N0CALL", token, sizeof(token), cs, sizeof(cs)));
     assert(!parseAppAuthCallingName("abc/N0CALL&x", token, sizeof(token), cs, sizeof(cs)));
+    assert(!parseAppAuthCallingName("abc/N0/CALL", token, sizeof(token), cs, sizeof(cs)));
     snprintf(name, sizeof(name), "%sX/N0CALL", sha);
     assert(!parseAppAuthCallingName(name, token, sizeof(token), cs, sizeof(cs)));
 
